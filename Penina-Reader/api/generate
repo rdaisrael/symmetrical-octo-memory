@@ -1,0 +1,41 @@
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+
+module.exports = async function (req, res) {
+    if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+    const { prompt, suppliedText } = req.body;
+
+    try {
+        if (suppliedText) {
+            const dictaRes = await fetch("https://nakdan-5-3.loadbalancer.dicta.org.il/addnikud", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    task: "nakdan",
+                    apiKey: process.env.DICTA_API_KEY,
+                    genre: "modern",
+                    data: suppliedText,
+                    useTokenization: true,
+                    matchpartial: true
+                })
+            });
+            const dictaData = await dictaRes.json();
+            let final = "";
+            for (const token of dictaData.data) {
+                if (token.sep) final += (token.nakdan && token.nakdan.word) ? token.nakdan.word : token.str;
+                else if (token.nakdan?.options?.length > 0) final += token.nakdan.options[0].w.replace(/\|/g, '');
+                else final += token.str;
+            }
+            return res.status(200).json({ text: final });
+        }
+
+        if (prompt) {
+            const genAI = new GoogleGenerativeAI(process.env.GOOGLE_GENERATIVE_AI_API_KEY);
+            const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+            const result = await model.generateContent(prompt);
+            return res.status(200).json({ text: result.response.text() });
+        }
+        return res.status(400).json({ error: "Missing input" });
+    } catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+};
