@@ -4,7 +4,7 @@ module.exports = async function handler(req, res) {
     }
 
     try {
-        const { prompt, suppliedText } = req.body;
+        const { prompt } = req.body;
         const GEMINI_KEY = process.env.GEMINI_API_KEY;
         const DICTA_KEY = process.env.DICTA_API_KEY;
 
@@ -12,29 +12,23 @@ module.exports = async function handler(req, res) {
             return res.status(500).json({ error: 'Server config error: Missing API keys.' });
         }
 
-        let plainHebrew = "";
+        // STEP 1: Ask Gemini to write the story
+        const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt + " \n\nCRITICAL INSTRUCTION: Return ONLY plain Hebrew text. Do NOT include any nikkud (vowels). Do NOT include any English or markdown formatting." }] }],
+                generationConfig: { temperature: 0.7 }
+            })
+        });
 
-        // STEP 1: Use Supplied Text or Ask Gemini
-        if (suppliedText) {
-            plainHebrew = suppliedText;
-        } else {
-            const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [{ parts: [{ text: prompt + " \n\nCRITICAL INSTRUCTION: Return ONLY plain Hebrew text. Do NOT include any nikkud (vowels). Do NOT include any English or markdown formatting." }] }],
-                    generationConfig: { temperature: 0.7 }
-                })
-            });
-
-            const geminiData = await geminiResponse.json();
-            
-            if (!geminiResponse.ok || !geminiData.candidates) {
-                return res.status(500).json({ error: 'Failed to generate story text from Gemini.' });
-            }
-
-            plainHebrew = geminiData.candidates[0].content.parts[0].text;
+        const geminiData = await geminiResponse.json();
+        
+        if (!geminiResponse.ok || !geminiData.candidates) {
+            return res.status(500).json({ error: 'Failed to generate story text from Gemini.' });
         }
+
+        const plainHebrew = geminiData.candidates[0].content.parts[0].text;
 
         // STEP 2: Send to Dicta for Nikkud
         const dictaPayload = {
@@ -45,7 +39,7 @@ module.exports = async function handler(req, res) {
             addmorph: false,
             matchpartial: false,
             keepmetagim: false,
-            keepqq: true,
+            keepqq: true,       // CRITICAL FIX: Tells Dicta to explicitly map Kamatz Katan
             apiKey: DICTA_KEY 
         };
 
