@@ -1,86 +1,73 @@
-module.exports = async function handler(req, res) {
-    if (req.method !== 'POST') {
-        return res.status(405).json({ error: 'Method Not Allowed' });
-    }
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+
+module.exports = async function (req, res) {
+    // Only allow POST requests
+    if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+    
+    const { prompt, suppliedText } = req.body;
 
     try {
-        const { prompt } = req.body;
-        const GEMINI_KEY = process.env.GEMINI_API_KEY;
-        const DICTA_KEY = process.env.DICTA_API_KEY;
+        // --- PATHWAY: Vocalization via Dicta ---
+        if (suppliedText) {
+            const dictaKey = process.env.DICTA_API_KEY;
+            
+            // Critical Check: If the key is missing, don't even try the request
+            if (!dictaKey) {
+                return res.status(500).json({ error: "Missing DICTA_API_KEY in Vercel Environment Variables." });
+            }
 
-        if (!GEMINI_KEY || !DICTA_KEY) {
-            return res.status(500).json({ error: 'Server config error: Missing API keys.' });
-        }
-
-        // STEP 1: Ask Gemini to write the story
-        const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt + " \n\nCRITICAL INSTRUCTION: Return ONLY plain Hebrew text. Do NOT include any nikkud (vowels). Do NOT include any English or markdown formatting." }] }],
-                generationConfig: { temperature: 0.7 }
-            })
-        });
-
-        const geminiData = await geminiResponse.json();
-        
-        if (!geminiResponse.ok || !geminiData.candidates) {
-            return res.status(500).json({ error: 'Failed to generate story text from Gemini.' });
-        }
-
-        const plainHebrew = geminiData.candidates[0].content.parts[0].text;
-
-        // STEP 2: Send to Dicta for Nikkud
-        const dictaPayload = {
-            task: "nakdan",
-            useTokenization: true,
-            genre: "modern",
-            data: plainHebrew,
-            addmorph: false,
-            matchpartial: false,
-            keepmetagim: false,
-            keepqq: true,       // CRITICAL FIX: Tells Dicta to explicitly map Kamatz Katan
-            apiKey: DICTA_KEY 
-        };
-
-        const dictaResponse = await fetch('https://nakdan-5-3.loadbalancer.dicta.org.il/addnikud', {
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-            body: JSON.stringify(dictaPayload)
-        });
-
-        if (!dictaResponse.ok) {
-            return res.status(500).json({ error: 'Dicta API rejected the request.' });
-        }
-
-        const dictaData = await dictaResponse.json();
-        
-        // STEP 3: Reconstruct the final text
-        let vowelizedText = "";
-        
-        if (dictaData && dictaData.data && Array.isArray(dictaData.data)) {
-            dictaData.data.forEach(token => {
-                if (token.sep) {
-                    vowelizedText += token.str || " ";
-                } else if (token.nakdan && token.nakdan.options && token.nakdan.options.length > 0) {
-                    let wordWithVowels = token.nakdan.options[0].w.replace(/\|/g, '');
-                    vowelizedText += wordWithVowels;
-                } else if (token.nakdan && Array.isArray(token.nakdan) && token.nakdan.length > 0) {
-                    let wordWithVowels = token.nakdan[0].w.replace(/\|/g, '');
-                    vowelizedText += wordWithVowels;
-                } else {
-                    vowelizedText += token.str || "";
-                }
+            const dictaRes = await fetch("https://nakdan-5-3.loadbalancer.dicta.org.il/addnikud", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    task: "nakdan",
+                    apiKey: dictaKey,
+                    genre: "modern",
+                    data: suppliedText.trim(),
+                    useTokenization: true,
+                    matchpartial: true
+                })
             });
-        } else {
-             return res.status(500).json({ error: 'Dicta API returned an unrecognized data format.' });
+
+            // Audit: If Dicta says no, get the specific reason
+            if (!dictaRes.ok) {
+                const errorDetail = await dictaRes.text();
+                return res.status(dictaRes.status).json({ 
+                    error: `Dicta API Rejected (${dictaRes.status}): ${errorDetail}` 
+                });
+            }
+
+            const dictaData = await dictaRes.json();
+            
+            // Reconstruct the Hebrew text from Dicta's token array
+            let finalHebrew = "";
+            for (const token of dictaData.data) {
+                if (token.sep) {
+                    finalHebrew += (token.nakdan && token.nakdan.word) ? token.nakdan.word : token.str;
+                } else if (token.nakdan?.options?.length > 0) {
+                    finalHebrew += token.nakdan.options[0].w.replace(/\|/g, ''); 
+                } else {
+                    finalHebrew += token.str;
+                }
+            }
+            return res.status(200).json({ text: finalHebrew });
         }
 
-        // STEP 4: Send the perfect text back to the browser
-        res.status(200).json({ text: vowelizedText });
+        // --- PATHWAY: Generation via Gemini ---
+        if (prompt) {
+            const googleKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+            if (!googleKey) return res.status(500).json({ error: "Missing GOOGLE_GENERATIVE_AI_API_KEY." });
+
+            const genAI = new GoogleGenerativeAI(googleKey);
+            const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+            const result = await model.generateContent(prompt);
+            return res.status(200).json({ text: result.response.text() });
+        }
+
+        return res.status(400).json({ error: "No text or prompt provided." });
 
     } catch (error) {
-        console.error("Server Error:", error);
-        res.status(500).json({ error: 'Internal server error during generation.' });
+        console.error("Backend Error:", error);
+        return res.status(500).json({ error: error.message });
     }
-}
+};
